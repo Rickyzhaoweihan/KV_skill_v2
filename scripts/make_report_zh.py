@@ -1,0 +1,296 @@
+# -*- coding: utf-8 -*-
+"""中文版结论页：从 outputs/RESULTS.json 渲染 docs/report_zh.html。"""
+from __future__ import annotations
+import json, html
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+R = json.load(open(ROOT / "outputs" / "RESULTS.json"))
+RUNS, LADDERS, PROBES = R["runs"], R["ladders"], R.get("probes", {})
+
+LABELS = {
+    "p0_quality_9b_LL/test": ("QuALITY", "L/L（9B 读自己编码的算子）", "未见过的文档"),
+    "p0_quality_9b_2b/test": ("QuALITY", "S/L（9B 读 2B 编码的算子）", "未见过的文档"),
+    "p0_longhealth_9b_LL_f0/test": ("LongHealth", "L/L", "留出折 0"),
+    "p0_quality_9b_LL_withindoc/train": ("QuALITY", "L/L", "同一批文档，未见过的问题"),
+    "p1_quality_9b_LL_center/test": ("QuALITY", "L/L，去均值", "未见过的文档"),
+    "p1_quality_9b_2b_center/test": ("QuALITY", "S/L，去均值", "未见过的文档"),
+    "p1_longhealth_9b_LL_f0_center/test": ("LongHealth", "L/L，去均值", "留出折 0"),
+    "p1_longhealth_9b_2b_f0_center/test": ("LongHealth", "S/L，去均值", "留出折 0"),
+    "p1_quality_9b_LL_center_1doc/train": ("QuALITY", "L/L，去均值，1 篇文档", "同一篇文档，未见过的问题"),
+    "p1_quality_9b_LL_center_5doc/train": ("QuALITY", "L/L，去均值，5 篇文档，600 步", "同一批文档，未见过的问题"),
+}
+
+
+def sc(row, c):
+    v = row.get(c)
+    return None if not v or v.get("score") is None else v["score"]
+
+
+def fmt(x, nd=3):
+    return "—" if x is None else f"{x:.{nd}f}"
+
+
+def gap_cls(g):
+    if g is None:
+        return ""
+    return "pos" if g >= 0.10 else ("neg" if g <= -0.05 else "zero")
+
+
+rows_html = []
+for k in LABELS:
+    if k not in RUNS:
+        continue
+    r = RUNS[k]; ds, cond, split = LABELS[k]
+    n = (r.get("kv") or {}).get("n", "")
+    g = r.get("kv_minus_wrong")
+    rows_html.append(
+        f"<tr><td>{ds}</td><td>{cond}</td><td>{split}</td><td class='num'>{n}</td>"
+        f"<td class='num'>{fmt(sc(r,'closed_book'))}</td><td class='num'>{fmt(sc(r,'text'))}</td>"
+        f"<td class='num em'>{fmt(sc(r,'kv'))}</td><td class='num'>{fmt(sc(r,'wrong_doc'))}</td>"
+        f"<td class='num'>{fmt(sc(r,'null'))}</td><td class='num'>{fmt(sc(r,'oracle_chunk'))}</td>"
+        f"<td class='num gap {gap_cls(g)}'>{'—' if g is None else f'{g:+.3f}'}</td></tr>")
+
+
+
+# ROUND2_SECTION present
+# ---------- direction runs (D1..D6, any key not in LABELS)
+DIRECTION_ROWS = []
+for k, r in RUNS.items():
+    if k in LABELS or k.startswith(("p0_", "p1_")):
+        continue
+    run, split = k.split("/")
+    n = (r.get("kv") or {}).get("n", "")
+    g = r.get("kv_minus_wrong")
+    enc = "same" if r.get("encoder") in (None, "same") else str(r.get("encoder")).split("/")[-1]
+    DIRECTION_ROWS.append(
+        f"<tr><td><code>{html.escape(run)}</code></td><td>{html.escape(split)}</td><td>{enc}</td><td class='num'>{r.get('steps') or ''}</td><td class='num'>{n}</td>"
+        f"<td class='num'>{fmt(sc(r,'closed_book'))}</td><td class='num'>{fmt(sc(r,'text'))}</td>"
+        f"<td class='num em'>{fmt(sc(r,'kv'))}</td><td class='num'>{fmt(sc(r,'wrong_doc'))}</td>"
+        f"<td class='num'>{fmt(sc(r,'null'))}</td><td class='num gap {gap_cls(g)}'>{'—' if g is None else f'{g:+.3f}'}</td></tr>")
+DIRECTION_TABLE = ("<div class='tbl'><table><thead><tr><th>运行</th><th>评测切分</th><th>编码器</th><th>步数</th><th>n</th><th>闭卷</th><th>文本</th><th>kv</th><th>错误文档</th><th>空算子</th><th>kv − 错误</th></tr></thead><tbody>" + "".join(DIRECTION_ROWS) + "</tbody></table></div>") if DIRECTION_ROWS else ""
+
+def ladder_svg(task: str, data: dict) -> str:
+    models = ["Qwen3.5-2B", "Qwen3.5-4B", "Qwen3.5-9B", "Qwen3.5-27B"]
+    pts = [(m, data[m]["closed_book"]["score"], data[m]["text"]["score"]) for m in models if m in data]
+    W, H, L, B, T, Rm = 520, 240, 56, 36, 18, 16
+    x = lambda i: L + i * (W - L - Rm) / max(1, len(pts) - 1)
+    y = lambda v: T + (1 - v) * (H - T - B)
+    g = []
+    for v in (0.2, 0.4, 0.6, 0.8, 1.0):
+        g.append(f"<line x1='{L}' y1='{y(v):.1f}' x2='{W-Rm}' y2='{y(v):.1f}' class='grid'/>"
+                 f"<text x='{L-8}' y='{y(v)+4:.1f}' class='tick' text-anchor='end'>{v:.1f}</text>")
+    for key in ("cb", "tx"):
+        idx = 1 if key == "cb" else 2
+        path = " ".join(f"{'M' if i == 0 else 'L'}{x(i):.1f},{y(p[idx]):.1f}" for i, p in enumerate(pts))
+        g.append(f"<path d='{path}' class='line {key}'/>")
+        for i, p in enumerate(pts):
+            g.append(f"<circle cx='{x(i):.1f}' cy='{y(p[idx]):.1f}' r='4' class='dot {key}'/>"
+                     f"<text x='{x(i):.1f}' y='{y(p[idx]) - 9:.1f}' class='val' text-anchor='middle'>{p[idx]:.2f}</text>")
+    for i, p in enumerate(pts):
+        g.append(f"<text x='{x(i):.1f}' y='{H-B+18}' class='tick' text-anchor='middle'>{p[0].replace('Qwen3.5-','')}</text>")
+    legend = (f"<g transform='translate({L},{H-6})'><line x1='0' y1='0' x2='18' y2='0' class='line tx'/><text x='24' y='4' class='tick'>文档在上下文中</text>"
+              f"<line x1='150' y1='0' x2='168' y2='0' class='line cb'/><text x='174' y='4' class='tick'>闭卷</text></g>")
+    return (f"<figure><svg viewBox='0 0 {W} {H}' role='img' aria-label='{task} 不同规模读者的准确率'>"
+            f"{''.join(g)}{legend}</svg><figcaption>{task}：文档在上下文中 vs 闭卷的准确率，测试集 200 题，只答答案的提示，256 token 预算。</figcaption></figure>")
+
+
+lad = {k.split("/")[1]: v for k, v in LADDERS.items() if k.startswith("ladder_v2/")}
+charts = "".join(ladder_svg("QuALITY" if t == "quality" else "LongHealth", lad[t]) for t in ("quality", "longhealth") if t in lad)
+
+probe_html = ""
+for run, summ in PROBES.items():
+    rows = []
+    for k, v in summ.items():
+        if not isinstance(v, dict) or "own_entropy" not in v or "own_route_top1" not in v:
+            continue
+        name = k.replace("trained", "已注册接口").replace("fresh", "未训练接口").replace("/L", " / 第 ") + " 层"
+        rows.append(f"<tr><td>{html.escape(name)}</td><td class='num'>{v['n']}</td><td class='num'>{v['own_entropy']:.2f} / {v['own_entropy_max']:.2f}</td>"
+                    f"<td class='num'>{v['own_top1']:.3f}</td><td class='num'>{v['own_route_top1']:.3f}</td>"
+                    f"<td class='num'>{fmt(v['gold_mass'], 4)}</td><td class='num'>{fmt(v['gold_chance'], 4)}</td></tr>")
+    probe_html += (f"<h3>读取注意力探针（<code>{html.escape(run)}</code>）</h3>"
+                   "<div class='tbl'><table><thead><tr><th>接口 / 注入层</th><th>n</th><th>熵 / 最大熵</th><th>top-1 槽位</th><th>top-1 块</th><th>落在正确答案槽位的质量</th><th>随机水平</th></tr></thead>"
+                   f"<tbody>{''.join(rows)}</tbody></table></div>")
+
+q = RUNS.get("p0_quality_9b_LL/test", {}); lh = RUNS.get("p0_longhealth_9b_LL_f0/test", {})
+qc = RUNS.get("p1_quality_9b_LL_center/test", {}); lhc = RUNS.get("p1_longhealth_9b_LL_f0_center/test", {})
+
+
+# ---------- round 3: native-state ceilings (D7, training-free prefix cache)
+STATE_CONDS = [("closed_book","闭卷"),("text","文本"),("all","KV+状态+卷积"),("kv_only","仅 KV"),("wrong_kv","错误文档 KV"),("state_only","仅状态"),("wrong_state","错误文档状态")]
+STATE_ROWS = []
+for run, row in sorted((R.get("state_ceiling") or {}).items()):
+    g = (row.get("kv_only-wrong_kv") or {}).get("gap"); gs = (row.get("state_only-wrong_state") or {}).get("gap")
+    task = "LongHealth 折 0" if "lh" in run else ("QuALITY 测试集" if "_q" in run else run)
+    cells = "".join(f"<td>{fmt(sc(row,c))}</td>" for c,_ in STATE_CONDS)
+    STATE_ROWS.append(f"<tr><td><code>{html.escape(run)}</code></td><td>{task}</td><td>{row.get('n')}</td>{cells}"
+                      f"<td class='{gap_cls(g)}'>{fmt(g,3) if g is None else f'{g:+.3f}'}</td><td class='{gap_cls(gs)}'>{fmt(gs,3) if gs is None else f'{gs:+.3f}'}</td><td>{fmt(row.get('agree_all_text'),2)}</td></tr>")
+STATE_TABLE = ("<div class='tbl'><table><thead><tr><th>运行</th><th>任务</th><th>n</th>" + "".join(f"<th>{l}</th>" for _,l in STATE_CONDS) + "<th>KV − 错误</th><th>状态 − 错误</th><th>全部 = 文本</th></tr></thead><tbody>" + "".join(STATE_ROWS) + "</tbody></table></div>") if STATE_ROWS else ""
+
+COMP_LABELS = dict(all="全部层（KV + 状态）", e4s="第 3,7,11,15 层 KV + 状态", a25="按注意力保留 25% 列 + 状态", r25="随机保留 25% 列 + 状态",
+                   a10="按注意力保留 10% 列 + 状态", a5="按注意力保留 5% 列 + 状态", kvo="仅 KV，全部 8 层", ka25="仅 KV，前 4 层，25% 列", ka10="仅 KV，前 4 层，10% 列", ka5="仅 KV，前 4 层，5% 列")
+COMP_HEAD = dict(h0="原生算子", h1="准确率", h2="错误文档", h3="差距")
+
+# ---------- round 3: D8 compression of the native operator (eval_prune.json)
+COMP_ORDER = [("all","{all}"),("kvs_E_100","{e4s}"),("kvs_E_acc25","{a25}"),("kvs_E_rand25","{r25}"),("kvs_E_acc10","{a10}"),("kvs_E_acc5","{a5}"),
+              ("kv_only","{kvo}"),("kv_E_acc25","{ka25}"),("kv_E_acc10","{ka10}"),("kv_E_acc5","{ka5}")]
+COMP_ROWS = []
+for run, comp in sorted((R.get("compression") or {}).items()):
+    rows = comp.get("rows") or {}
+    for c, label in COMP_ORDER:
+        v = rows.get(c)
+        if not v:
+            continue
+        mib = None if v.get("bytes") is None else v["bytes"] / 2**20
+        g = v.get("gap")
+        COMP_ROWS.append(f"<tr><td>{label.format(**COMP_LABELS)}</td><td>{'—' if mib is None else f'{mib:.0f}'}</td><td>{fmt(v.get('score'))}</td><td>{fmt(v.get('wrong'))}</td>"
+                         f"<td class='{gap_cls(g)}'>{'—' if g is None else f'{g:+.3f}'}</td><td>{v.get('n')}</td></tr>")
+COMP_TABLE = ("<div class='tbl'><table><thead><tr><th>{h0}</th><th>MiB</th><th>{h1}</th><th>{h2}</th><th>{h3}</th><th>n</th></tr></thead><tbody>".format(**COMP_HEAD) + "".join(COMP_ROWS) + "</tbody></table></div>") if COMP_ROWS else ""
+
+page = f"""<title>KV-Skill v2 P0 门槛</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600&family=Noto+Sans+SC:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* 版式：实验记录式报告——单栏阅读，数据表在栏内横向滚动，图表按比例绘制 */
+:root {{
+  --bg: #f7f6f2; --surface: #ffffff; --fg: #1c1f22; --muted: #5d646b; --rule: #d9d6cd;
+  --accent: #0f6b5c; --accent-ink: #0a4a40; --neg: #9a3b2e; --zero: #8a8f94; --pos: #0f6b5c;
+  --display: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}}
+@media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{
+  --bg: #15181b; --surface: #1d2125; --fg: #e8e6df; --muted: #a2a8ad; --rule: #353b41;
+  --accent: #5fc3ad; --accent-ink: #8fd9c8; --neg: #e08a7a; --zero: #8a8f94; --pos: #5fc3ad; color-scheme: dark }} }}
+:root[data-theme="dark"] {{
+  --bg: #15181b; --surface: #1d2125; --fg: #e8e6df; --muted: #a2a8ad; --rule: #353b41;
+  --accent: #5fc3ad; --accent-ink: #8fd9c8; --neg: #e08a7a; --zero: #8a8f94; --pos: #5fc3ad; color-scheme: dark }}
+body {{ background: var(--bg); color: var(--fg); font-family: var(--body); line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 32px 64px; }}
+main {{ max-width: 76ch; margin: 0 auto; display: grid; gap: 28px; }}
+h1 {{ font-family: var(--display); font-weight: 600; font-size: clamp(1.6rem, 4vw, 2.2rem); line-height: 1.3; margin: 0; text-wrap: balance; }}
+h2 {{ font-family: var(--display); font-weight: 600; font-size: 1.3rem; margin: 8px 0 0; text-wrap: balance; }}
+h3 {{ font-weight: 600; font-size: 1.02rem; margin: 6px 0 0; }}
+p {{ margin: 0; max-width: 68ch; }}
+.eyebrow {{ font-size: .78rem; letter-spacing: .12em; color: var(--muted); }}
+.verdict {{ border-left: 4px solid var(--accent); padding: 10px 16px; background: var(--surface); display: grid; gap: 8px; }}
+.verdict strong {{ color: var(--accent-ink); }}
+.tbl {{ overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }}
+table {{ border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 640px; }}
+th, td {{ padding: 7px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }}
+th {{ font-size: .78rem; letter-spacing: .06em; color: var(--muted); font-weight: 600; }}
+td.num {{ font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }}
+td.em {{ font-weight: 600; }}
+td.gap.pos {{ color: var(--pos); font-weight: 600; }} td.gap.neg {{ color: var(--neg); }} td.gap.zero {{ color: var(--zero); }}
+figure {{ margin: 0; display: grid; gap: 6px; }} svg {{ width: 100%; max-width: 100%; height: auto; }}
+figcaption {{ font-size: .82rem; color: var(--muted); }}
+.grid {{ stroke: var(--rule); stroke-width: 1; }} .tick, .val {{ fill: var(--muted); font-family: var(--mono); font-size: 11px; }}
+.val {{ fill: var(--fg); }} .line {{ fill: none; stroke-width: 2; }} .line.tx, .dot.tx {{ stroke: var(--accent); fill: var(--accent); }}
+.line.cb, .dot.cb {{ stroke: var(--muted); fill: var(--muted); }} .line.cb {{ stroke-dasharray: 4 3; }} .dot.tx, .dot.cb {{ stroke: none; }}
+.charts {{ display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }} .charts > * {{ min-width: 0; }}
+ul {{ margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }} li {{ max-width: 68ch; }}
+code {{ font-family: var(--mono); font-size: .88em; }}
+.meta {{ font-size: .82rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }}
+</style>
+<main>
+  <div>
+    <div class="eyebrow">KV-Skill v2 · 小模型编码、大模型阅读 · P0 内容门槛</div>
+    <h1>读取文档算子：接口必须学会什么</h1>
+    <div class="meta"><span>读者 Qwen3.5-9B</span><span>编码器：9B（L/L）与 2B（S/L）</span><span>注册 300 步，20 篇训练文档</span><span>{date.today().isoformat()}</span></div>
+  </div>
+
+  <section class="verdict">
+    <strong>现状（第三轮）：预先登记的门槛首次通过，且免训练、同模型：读取器自己一次预填充收集的全注意力 K/V，由其原生注意力读取，比错误文档高 +0.15（LongHealth，n=80）和 +0.125（QuALITY，n=200）；再加上 DeltaNet 状态即可复现上下文内的答案。前两轮所有基于 softmax-slot 读取的学习接口都失败，原因在读取方式而不在算子。跨模型读取现在也有了第一个通过：2B 编码器的算子由 2B 自己在问题上寻址、再经闭式映射 B 送入 9B，在 LongHealth（n=80）上比错误文档高 +0.21、在 QuALITY（n=300）上高 +0.17，两者都高于闭卷对照，完全不需要训练；在全部 8 层读取时 LongHealth 达到 9B 自己读原文的水平（0.7875，原文 0.825），但 QuALITY 上不行，所以前期层读取才是稳健的配置。换成 4B 编码器，该配置让 9B 在 LongHealth / QuALITY 上达到 0.81 / 0.77，而它自己读原文为 0.825 / 0.81。<em>论文原文形式的读取现在也成立了：</em>读取器自己的查询，经过先从编码器注意力蒸馏、再用论文 KL + CE 训练的接口，在 LongHealth（n=80）上以 0.7625 对 0.425、在 QuALITY（n=300）上以 0.633 对 0.453 读取 2B 固定的算子，两个任务都通过两项判据，推理时不需要编码器。原生算子的压缩（D8）在早期层列保留到 25% 时仍保持文档身份。</strong>
+    <p>在未见过的文档上，读者加载正确文档的算子与加载错误文档的算子得分相同
+      （QuALITY L/L {fmt(sc(q,'kv'))} vs {fmt(sc(q,'wrong_doc'))}，n={(q.get('kv') or {}).get('n','')}；LongHealth L/L {fmt(sc(lh,'kv'))} vs {fmt(sc(lh,'wrong_doc'))}）。
+      把算子库限制到含正确答案的块也没有帮助；未去均值的接口在 51 组配对样本中有 48 组对正确文档和错误文档生成了逐字相同的输出。
+      分支的输出不是所加载文档的函数。这是读取的失败，不是算子的失败：算子就是编码器逐 token 的隐状态，注册过程不改动它，内容本来就在里面；只是注册出的查询映射始终没有学会寻址（见下方探针）。换成 2B 编码器写算子、或者在接口训练过的那批文档上测未见过的问题，结论都一样。</p>
+    <p>验证成立的部分：流水线本身（2B 编码 265 篇 QuALITY 文档耗时 206 秒；9B 注册每步 2.2 秒、峰值显存 19 GiB；接口能带来与文档无关的 +3 到 +8 分偏移），以及规模阶梯——两个数据集上 2B 与 4B 之间都存在真实的“文档在上下文中”差距。</p>
+  </section>
+
+  <section>
+    <h2>门槛表</h2>
+    <p>所有条件使用贪心解码、只答答案的提示、256 token 预算和相同的题目。<em>kv</em> 加载正确文档的分块算子库；<em>错误文档</em> 加载同任务的另一篇文档；<em>空算子</em> 加载随机算子；<em>oracle</em> 把库限制到含正确答案文本的块（仅在可定义的题目上计算）。门槛量是 kv − 错误文档，预先登记的通过阈值为 +0.10。</p>
+    <div class="tbl"><table>
+      <thead><tr><th>数据集</th><th>条件</th><th>评测题目</th><th>n</th><th>闭卷</th><th>文本</th><th>kv</th><th>错误文档</th><th>空算子</th><th>oracle</th><th>kv − 错误</th></tr></thead>
+      <tbody>{''.join(rows_html)}</tbody></table></div>
+  </section>
+
+  <section>
+    <h2>为什么读取对文档“失明”</h2>
+    <ul>
+      <li>单位化后的残差槽位共享一个主导的公共方向：其模长在深度 0.25 处为 0.59（2B）和 0.85（9B）。文档内与文档间的槽位相似度相同（0.36 vs 0.35），所以无论加载哪篇文档，读出的基本是语料均值。</li>
+      <li>按深度去均值可以消掉这个方向（相似度降到约 0，读取的 top-1 质量从 0.69–0.91 升到 0.95–0.99），但去均值后的运行得分与闭卷相同：偏移消失，内容也没有出现（QuALITY L/L 去均值 {fmt(sc(qc,'kv'))} vs 错误文档 {fmt(sc(qc,'wrong_doc'))}；LongHealth {fmt(sc(lhc,'kv'))} vs {fmt(sc(lhc,'wrong_doc'))}）。</li>
+      <li>读取从未学会寻址。在 LongHealth 上用去均值的 9B 接口探针：一篇文档约 11,000 个槽位，注意力熵为 8.6–8.9 nat（最大 9.3），top-1 槽位只占 0.005 的质量，落在正确答案槽位上的质量为 0.0010–0.0014，而随机水平是 0.001；未训练的接口为 9.2 nat。注册只让块级路由略微集中（top-1 块 0.19–0.26，未训练 0.05），槽位级读取仍是整篇文档的平均。</li>
+      <li>注入幅度不是瓶颈：相对更新达到残差范数的 1.3–1.6%，与已发表的 rank-1 程序性技能所用的 2.3% 同量级。</li>
+      <li>这与此前 delta-skill 用池化算子在 LongHealth 上得到的结果一致，现在在块级分辨率下补齐了错误文档、空算子、oracle 对照和跨模型编码器。</li>
+    </ul>
+    {probe_html}
+    <h3>内容在算子里；缺的是寻址和写回（D6 诊断，LongHealth 折 0）</h3>
+    <ul>
+      <li>对采集到的槽位做线性探针：从槽位向量读出该位置的 token，在全词表上 top-1 准确率 0.73–0.81（9B top-10 为 0.92–0.95）；20 选 1 判断属于哪篇文档 0.58–0.73（随机 0.05）；在正确答案出现处读出是哪个选项 0.64–0.72（随机 0.20，n=51）。文档内容确实在算子里。</li>
+      <li>用问题在编码器自身空间里做相似度检索找不到答案：以问题的残差为查询，正确槽位进入 top-10 的比例只有 0.00–0.02；而以答案文本为查询则为 0.71（top-100 为 0.94–0.96）。逐 token 的残差状态不是可被问题寻址的键。</li>
+      <li>评测时把注意力强制放到正确槽位，留出题目上正确选项的概率只比随机槽位高 +0.015 ± 0.014，哪怕先在强制寻址下再注册 100 步也一样；只有训练时见过的题目才上升 +0.34。写回部分（B、门控、增益）学到的是逐题查表，而不是读内容。注意：选择题要求把注入的内容再和选项匹配，span 答案任务能更直接地检验写回（已在 MuSiQue 上排队）。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>并行方向（进行中）</h2>
+    <p>各方向代理的运行，全部保持论文的算子形式。D1 = 岭回归初始化的查询映射；D2 = 槽位级检索监督；D3 = 用注意力键/值构造算子；D4 = 按文档用奖励学习紧凑算子；D5 = 更长/更大规模的注册；D6 = 诊断。第三轮（进行中）：D7 = 用读者自己的注意力做读取（A = q_proj，B = o_proj；跨模型部分是键/值空间的线性对齐）；D8 = 用原生注意力按问题选 top-k 槽位再做紧凑读取；D9 = 从读文本的教师向接口做稠密蒸馏（注意力模式 + 残差状态目标，规模化训练）。判据始终相同。</p>
+    {DIRECTION_TABLE}
+  </section>
+
+  <section>
+    <h2>第二轮各方向的发现</h2>
+    <ul>
+      <li>目前还没有只训练接口的方向通过留出门槛（kv − 错误文档 ≥ +0.10）。留出集上最大的差距来自 D2 在 LongHealth 上的槽位监督（+0.063，n=80）和 D2+D3 的组合（+0.025）；探针显示这两者首次出现了真正的寻址：落在正确答案槽位上的质量是随机水平的 4–9 倍，而所有只用答案监督的接口都停在随机水平。</li>
+      <li>单纯更长、更大规模的注册没有作用：150 篇文档 × 2000 步为 +0.013（n=300）；5 篇文档训练 2000 步后，在训练过的问题上 +0.205，在同一批文档的未见问题上为 0.000——接口记住的是“问题→答案”对，而不是学会阅读。</li>
+      <li>把键换成注意力键让读取变尖锐（熵 4.6–7.4，残差状态为 8.6–8.9），但指向的是与文档无关的位置；用 token 对齐的 2B↔9B 状态岭回归初始化查询映射没有改变结果（+0.013 / +0.017）。</li>
+      <li><strong>奖励学习的紧凑算子（论文的第二种构造）是唯一在点估计上越过门槛的方向。</strong>每篇文档 64 个槽位的算子，用去均值后的采集槽位做 SVD 初始化，再按论文的组归一化奖励配方（T=1.5、16 个提示 × 8 个采样、无 KL 热身）通过冻结的去均值接口训练，在 10 篇训练文档的未见问题上比加载其他文档的算子高 +0.110（n=82；95% 置信区间 −0.01 到 +0.23；配对 17 胜 8 负，p≈0.11）。同样的算子在 RL 之前只有 +0.024，说明奖励更新向算子写入了约 +0.09 的文档特定内容，这是一次前向算子所没有的。注意：RL 在每篇约 8 个问题上约 20 步内饱和（不到 20% 的采样组有奖励方差）；kv 的提升有一部分与文档无关（错误文档 0.573 vs 闭卷 0.500）；置信区间触及零。<strong>30 篇文档的确认（种子 0，n=262，为已训练文档的未见问题）：kv 0.534 对错误文档 0.450，+0.084</strong>，这次奖励信号是真实的（训练奖励 0.3 → 0.9，16 组中 7–13 组有信息量）。同一批算子在任何奖励更新之前（SVD 压缩、经冻结接口读取）为 +0.050（kv 0.527 对错误文档 0.477），所以奖励更新额外带来 +0.034 的文档特异内容，并压低了错误文档的分数。种子 1 复现了这一结果：+0.076（n=262），因此按奖励学习的紧凑算子在两个种子上稳定在约 +0.08（其 SVD 初始化对照两次都是 +0.050，即奖励更新贡献 +0.03），低于 +0.10 门槛但明确为正。小编码器变体（64 槽位算子由 2B 的收集结果初始化、经 2048 维接口由 9B 读取）落在同一区间：kv 0.553 对错误文档 0.477（+0.076，n=262），所以无论由哪个编码器初始化，按奖励学习的路线都给出约 +0.08。它的对照更有意思：2B 初始化的算子在任何奖励更新之前不携带任何内容（−0.015），而 9B 初始化的起点是 +0.05，所以在跨模型初始化上，这 +0.09 的文档特异内容完全是奖励更新自己建立起来的。在 LongHealth 上（已训练文档的未见问题，n=154）同样的配方为 +0.084，奖励更新前为 +0.020，因此按奖励学习的算子在两个任务上都约为 +0.08，其中奖励更新贡献 +0.03 到 +0.09。四次运行都以 p &lt; 0.05 超过错误文档对照，但都未达到 +0.10。两点注意：这些运行中的接口是在这些文档的全部问题上注册的，所以只有配对差距是公平的，绝对水平不是；而且该方法是通过关于某文档的问题来学习该文档，而不是读取未见过的文档。小编码器配置的扩大规模运行（每篇文档 100 步奖励更新、在不相交文档上注册的接口、两个种子）正在进行。</li>
+      <li>结合 D6：内容在算子里且可线性解码；问题无法靠相似度寻址 token 残差；槽位监督能教会一些寻址；但写回部分无法在不逐题记忆的情况下把检索到的内容变成选择题字母。MuSiQue 的 span 答案测试（kv 0.15 vs 错误文档 0.13 vs 文本 0.47）也没有挽救写回。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>第三轮：文档内容在混合架构读取器里存放在哪里（D7 上限，免训练）</h2>
+    <p>Qwen3.5 是混合架构：每 4 层中有 3 层是 Gated-DeltaNet，其文档记忆是固定大小的循环状态 S = Σ v kᵀ（9B：24 层 × 32 头 × 128 × 128 ≈ 24 MB，与文档长度无关）——这正是论文的关联算子 M = W Uᵀ 及其线性读取 W(Uᵀq)。另外 8 层是全注意力，其文档记忆是逐 token 的 K/V（11k token 的文档约 353 MB）。D7 让读取器自己预填充一次文档，收集这两部分，再以前缀缓存的方式免训练地注入，在未见文档上评测（9B 读 9B）：</p>
+    {STATE_TABLE}
+    <ul>
+      <li><strong>预先登记的门槛首次通过。</strong>仅用全注意力 K/V、由读取器自身的注意力读取，就比错误文档高 +0.15 ± 0.05（LongHealth，n=80）和 +0.125 ± 0.03（QuALITY，n=200）。算子仍是原封不动的收集结果；变化的是读取方式：在全部 8 个全注意力层用读取器原生的多头注意力，而不是在 4 个深度上学一个对 slot 的 softmax。</li>
+      <li>K/V + DeltaNet 状态 + 卷积状态能复现上下文内的答案（0.81 对 0.825；94–95% 生成完全一致），说明收集是无损的。状态单独不可读：LongHealth 上低于闭卷（0.24 对 0.49），QuALITY 上与闭卷持平（0.42 对 0.41），错误文档的状态同样差。状态只有叠加在 K/V 之上才贡献 +0.24。</li>
+      <li>教师自己从问题最后一个 token 出发的注意力，落在金标答案 token 上的质量也只有随机水平的 2–4 倍，所以“金标 slot 质量”（第二轮的探针）不能作为读取的门槛；D2 的 4–7 倍其实已经达到教师水平。检索分布在多个头、多个层和多个位置上。</li>
+      <li><strong>读取发生在哪些层（D7 最小集，LongHealth，n=80）。</strong>第 16 层以下的全部内容——前四个注意力层的 K/V，加上其下十二个线性层的卷积状态与循环状态——得 0.800，错误文档只有 0.275；四个早期注意力层缺一不可（任意两层 ≤ 0.66，任意单层 ≤ 0.59），后四个注意力层毫无贡献（带状态仅 0.24）。K/V 加 1.5 MB 的卷积状态即可达 0.763，24 MB 的循环状态只再加 +0.05。错误文档的分数远<em>低于</em>闭卷：原生读取是文档特异的。QuALITY（20 篇未见文档，n=200）复现了每一行：第 16 层以下 0.780 对错误文档 0.405；K/V + 卷积 0.760 对 0.430；两层 0.55–0.71，单层 0.43–0.60。而且卷积状态可以由读取器自己只预填充文档最后 64 个 token 来代替：早期层 K/V 加这段尾巴在 LongHealth 上 0.725 对 0.4375、在 QuALITY 上 0.685 对 0.465，再加上收集的循环状态即恢复到完整的 0.81 / 0.785。因此跨模型接口只需要映射 K/V 分支（可选循环状态），不必映射卷积状态。</li>
+      <li><strong>压缩（D8）。</strong>按文档自身预填充时各位置累积的注意力来裁剪早期层 K/V 列：保留 10% 列 + 状态在 43 MiB 下得 0.65，保留 5% 在 34 MiB 下得 0.60，对比 202 MiB 的 0.81；若不带状态，裁剪后的 K/V 只比错误文档高 +0.05–0.08。状态是压缩后算子仍可读的关键。<strong>跨模型（D14，2B→9B 编码器侧读取）：</strong>只需运送读取用到的编码器层（精确无损），K/V 与状态的 4-bit 逐通道量化在噪声范围内无损（LongHealth 23.8 MiB 时 0.70，未压缩 0.675；QuALITY 12.3 MiB 时 0.613，未压缩 0.620，约比完整缓存小 6 倍），按注意力保留 10% 列再加 4-bit 是在两个任务上仍通过两项判据的最小算子（每篇文档 4.2 / 3.0 MiB，小 25–34 倍，准确率低 0.10–0.14，QuALITY 仅比尾巴对照高 0.02）。在论文形式下算子只是读取层的 K/V，同样的规则约给出 4-bit 时 22 / 10.5 MiB、加剪枝后 1–6 MiB，需要用读取器侧查询重新验证。QuALITY（n=200）结论一致：保留 10% 列 + 状态在 34 MiB 下得 0.730，保留 5% 在 30 MiB 下得 0.695，对比 197 MiB 的 0.785 与原文的 0.795；在 10% 时按注意力选列优于随机（0.73 对 0.675）。关于差距的注意事项：带状态的各行里，错误文档对照同样载入了错误文档的状态，被压到闭卷以下，因此那些 +0.3 到 +0.55 的差距高估了内容量。干净的身份检验是仅 K/V 的差距：它在早期层列保留到 25% 时仍过 +0.10 门槛（LongHealth 44 MiB 时 +0.125，QuALITY 21 MiB 时 +0.09 到 +0.11），到 10% 和 5% 时降到约 +0.075；5% 随机裁剪则完全没有文档身份（0.000）。</li>
+      {COMP_TABLE}
+      <li><strong>跨模型接口（D10），保持论文的形式。</strong>在读取器第 3,7,11,15 层各加一条独立读取分支：q' = A·q，对编码器存储的键做注意力，读出的值经 B 映射回读取器的注意力输出。同模型恒等初始化精确复现原生上限（注意力分支 +0.16，加状态分支 +0.575，n=80）；不走恒等捷径、用岭回归拟合的 9B→9B 映射同样复现（+0.175）。只用答案监督注册 2B→9B 映射结果为零（−0.007，n=300；训练损失 → 0，未见文档差距 0，门控 ≈ 0），与此前所有只用答案的配方一致。<strong>闭式、无标签的映射给出了第一个跨模型信号：</strong>在 token 对齐的 9B/2B 查询上岭回归拟合 A、在值上拟合 B（分词器相同，每个文档 token 都是一对样本），零训练读取，在 QuALITY 未见文档上 kv 0.48 对错误文档 0.44（+0.040 ± 0.017，n=200，10 胜 2 负），寻址散度 0.26–0.38（同模型 0.11–0.20，均匀 0.42–0.52）。同一套在 QuALITY 上拟合的映射在 LongHealth 上几乎不能寻址（+0.0125，散度 0.41），说明线性映射对领域敏感；用多领域文档池重新拟合没有帮助（+0.023，n=300），因为逐层线性查询映射在每个领域上的留出 R² 都只有 0.35–0.45；直接按教师注意力模式拟合 A 把散度降到 0.21–0.29，但在 LongHealth 上没有未见文档的增益（−0.025 / −0.0125）。有一个假阳性值得记录：加上读取器自己的 64 token 尾巴后，2B 算子经岭回归映射在 QuALITY 上 kv 0.44 对错误文档 0.33（+0.107，n=300），但读取器只带尾巴就有 0.51，且错误文档条件的生成长度翻倍，所以这个差距是不对称的失控，不是读取。因此判据现在同时要求 kv ≥ 闭卷对照（不造成伤害）。按注意力拟合的映射满足这一条但没有增益：QuALITY 加尾巴时 kv 0.513 与仅尾巴对照（0.51）持平，比错误文档高 +0.04（n=300），生成长度正常，但分支落在文档槽位上的质量降到 0.12（教师为 0.62），即拟合学到的是让分支保持安静，而不是正确寻址。<strong>第四轮更新，论文原文写法的读取：</strong>在不使用标签的情况下训练读取器一侧的查询映射 A，使其复现编码器自己在问题上对缓存的注意力（未见文档上留出注意力散度 0.094、读出余弦 0.94），得到第一个通过两项判据的读取器查询读取：kv 0.4875 对错误文档 0.3375（+0.15 ± 0.05），并高于仅尾巴对照 0.4375（LongHealth 折 0，n=80），算子原封不动、没有使用答案标签；同一分支上旧的岭回归 A 只有 0.325（未通过）。非线性（MLP）A 将其提高到 0.5375 对 0.3875，比对照高 0.10。在 QuALITY（n=300）上论文形式的读取尚未过线：线性 A 0.547 对 0.467（+0.08），MLP A 0.563 对 0.473（+0.09），都高于仅尾巴对照 0.51，但并不优于该任务上的岭回归基线。<strong>再从蒸馏得到的 A 出发、用论文自己的 KL + CE 目标训练，论文形式的读取在 LongHealth 折 0 上达到 0.7625 对错误文档 0.425（+0.34 ± 0.05，27 胜 0 负，n=80；仅尾巴 0.4375，原文 0.825）</strong>：高于同一 2B 编码器的编码器侧读取（0.675），且推理时只有读取器在运行，2B 收集的算子原封不动。<strong>QuALITY 现在也通过了：</strong>0.633 对错误文档 0.453（+0.18 ± 0.03，75 胜 21 负，n=300），比仅尾巴对照 0.51 高 +0.12，同样高于同一编码器的编码器侧读取（0.61）。论文形式的读取在两个任务上都通过了两项判据。两条去掉查询映射的路线：把算子的键一次性映射过去（D7 的键映射 R² 达 0.54–0.70），让读取器原生寻址；或让 2B 在问题上读自己的缓存，只把读出的值映射进读取器。<strong>第二条是第一个同时满足两项判据的跨模型通过，且免训练。</strong>编码器侧寻址：2B 把文档预填充一次，再在该缓存上处理问题，用自己的查询寻址自己的键（读取发生在算子的原生空间）；在读取器的第 3、7、11、15 层，把 2B 逐 token 的注意力输出经闭式岭回归 B（在 token 对齐的 2B→9B 注意力输出上拟合，留出 R² 0.51–0.60）映射后替换读取器的注意力输出，并带上读取器自己的 64 token 尾巴。LongHealth 折 0，n=80：kv 0.5875 对错误文档 0.375（+0.21 ± 0.05，19 胜 2 负），高于仅尾巴对照 0.4375 和闭卷 0.4875，生成长度正常（各条件均 6.0–6.1 token）；文本 0.825。读出值与 9B 自身上下文内注意力输出的余弦相似度 0.83–0.90。同模型锚点（9B 读自己的缓存，B = 恒等）为 0.775 对 0.325。这里的接口只有 B，由成对预填充闭式拟合，无标签、无训练。把 2B 经过输出投影后的注意力输出（映射进读取器的残差空间）效果更好：kv 0.625 对错误文档 0.40（+0.225 ± 0.06，22 胜 4 负，n=80）；而把映射后的读出值与读取器自己不含文档的注意力输出混合只会稀释（50% 混合 0.50，25% 混合 0.49）。另一条路线——把算子的键和值一次性映射到读取器空间（D7 的键映射，R² 0.54–0.70）、让读取器原生寻址——结果为零（kv 0.45 对错误文档 0.425，n=80；散度 0.39），说明读取器一侧对线性映射过来的外来缓存寻址，两个方向都不行：寻址必须发生在算子的原生空间，只有写回跨模型。<strong>QuALITY 在 300 个未见问题上确认了编码器侧读取：kv 0.600 对错误文档 0.430（+0.17 ± 0.03，64 胜 13 负），仅尾巴对照 0.510，闭卷 0.450，文本 0.810，生成长度正常。</strong>两个任务现在都用同一个闭式映射、零训练通过了两项判据。<strong>全量 n 的结果（D11）：</strong>在全部 400 个 LongHealth 问题上（两路交叉拟合的 B，拟合时没见过被评文档），2B→9B 为 0.777 对 0.405，4B→9B 为 0.820–0.823 对 0.37–0.38（原文 0.86）；在完整 QuALITY 测试集（n=1057）上 2B→9B 为 0.609 对 0.412，4B→9B 为 0.762–0.791 对 0.42–0.44（原文 0.828）。在两个选择题任务上，读取达到编码器自身读原文准确率的 96–101%。尾巴取 0 个 token 时 kv 不变（读取器无需看到任何文档 token），完全不用 LongHealth 文档拟合的 B 在 LongHealth 上表现相同。在 span 答案任务（MuSiQue、LastingBench）上，两种编码器都未通过“不造成伤害”规则；输出格式正常，失败原因是实体或推理跳跃错误（只达到编码器自身读原文 F1 的 22–38%）。在全部 8 个注意力层（而非前 4 层）读取，把 LongHealth 提升到 kv 0.6625 对错误文档 0.375（+0.29 ± 0.05，24 胜 1 负，n=80），同模型锚点为 0.7875。<strong>在全部 8 层使用投影后的读出值，2B→9B 达到 kv 0.7875 对错误文档 0.325（+0.46 ± 0.06，38 胜 1 负，n=80）：与同模型锚点相等，接近 9B 自己读原文的 0.825。</strong>非线性 B 并不优于线性 B（投影前层级 0.6375 对 0.6625），所以闭式写回不是瓶颈。QuALITY 上投影后层级、4 层时 kv 0.610 对错误文档 0.443（+0.167，n=300），与投影前层级相当。<strong>但 8 层配置没有迁移到 QuALITY：</strong>kv 0.463 低于仅尾巴对照（0.517）、与闭卷持平，错误文档 0.32，所以那个差距是不对称的伤害，该配置在此未通过“不造成伤害”规则。稳健的配置是前 4 层，它在两个任务上都高于对照。可能的原因是替换读取器的后期注意力层会把小编码器自己的推理带进来，而它在 QuALITY 上很弱（2B 读原文只有 0.60，LongHealth 上为 0.79），前期层则只带入它的检索。层子集扫描（2B→9B，投影后）找到了转折点：QuALITY 上 4 层 0.610，5 层（3–19）0.623，6 层（3–23）降到 0.543，8 层 0.463，对照 0.517；LongHealth 上同样的集合为 0.625 / 0.675 / 0.71 / 0.7875。7 层为 0.553；替换前 5 层并以一半增益叠加后几层得 0.623 对 0.46，并不优于单独的 5 层。5 层替换是在两个任务上都成立的最佳配置。<strong>编码器规模轴第一行：</strong>4B 编码器在稳健的 4 层配置下，让 9B 在 LongHealth 上得 kv 0.8125 对错误文档 0.375（+0.44 ± 0.06，37 胜 2 负，n=80；仅尾巴对照 0.45），即 9B 自己读原文的水平（0.825），来自 4B 的算子，免训练；在 QuALITY 上 kv 0.773 对错误文档 0.427（+0.35 ± 0.03，111 胜 7 负，n=300；对照 0.517；原文 0.81）。算子质量跟随编码器自身的能力（2B 读原文在 QuALITY / LongHealth 上为 0.60 / 0.79，4B 为 0.81 / 0.87），所以 4B 编码器已经让 9B 在两个任务上都只比自己读原文低四到五个点。27B 读取器的第一次运行（2B 编码器）结果为零（kv 0.3875 对仅尾巴对照 0.475，n=80），但它用的是 27B 最前面的 4 个注意力层（深度 0.05–0.25），而不是 9B 配置所对应的按深度匹配的区间（深度 0.1–0.5，即 27B 深度 0.5 以下的 8 个注意力层）；采用按深度匹配的层集合后，27B 的同模型锚点成立（kv 0.775 对错误文档 0.45，n=80；原文 0.8625），按深度匹配的 2B→27B 结果偏弱：kv 0.5125 对错误文档 0.4375（+0.075，n=80），仅略高于仅尾巴对照（0.475），读出映射在 27B 较深层的留出 R² 降到 0.24–0.33，说明 13 倍的规模比对闭式线性写回是个考验。9B→27B（3 倍）得 kv 0.6125 对错误文档 0.5125（+0.10，n=80），对照 0.475，27B 自身锚点 0.775；错误文档本身也高于对照，说明线性 B 送进 27B 的内容有一部分与文档无关。QuALITY（n=200）上 2B→27B 为 kv 0.61 对错误文档 0.52（+0.09；对照 0.565；27B 读原文为 0.935）。9B→27B 在 QuALITY 上通过两项判据：kv 0.685 对错误文档 0.51（+0.175，n=200；对照 0.565）。4B→27B 落在同一区间（LongHealth 上 0.60 对 0.475，+0.125；QuALITY 上 0.675 对 0.515，+0.16，n=200，通过两项判据），所以进入 27B 时编码器规模几乎不改变结果，说明瓶颈在写回而不在算子。27B 还需要完整的下半区间：5 层类比（深度 0.3 以下）对每个编码器都不高于对照（2B / 4B / 9B：LongHealth 上 0.39 / 0.44 / 0.41，QuALITY 上 +0.00 / +0.03 / +0.01），而且 27B 自己的同模型锚点只替换这 5 层时为 0.40 对错误文档 0.50，说明即使用它自己精确的读出值，部分替换前期层也会伤害 27B：这是读取器的性质，与编码器无关。对 27B 读取器而言闭式写回是薄弱环节，而用正则化扫描重新拟合 B 也没有改变结果（9B→27B：LongHealth 上 0.5875 对 0.5125，QuALITY 上 0.695 对 0.525；以一半增益叠加读出值而非替换则更弱，+0.05），所以对 27B 而言这是线性逐 token 写回的结构性上限，而非拟合问题。<strong>第四轮突破了这一上限：</strong>以相邻编码器层为输入的闭式写回，把 8 层集合上的 9B→27B 提升到 LongHealth 0.7125 对 0.4875（n=80；27B 锚点 0.775）、QuALITY 0.74 对 0.54（+0.20，n=200；仅尾巴 0.565），此前分别为 0.61 和 0.685，仍然不需要训练；而替换全部 16 层在 QuALITY 上未通过“不造成伤害”规则（0.50 对 0.565）。<strong>用论文的 KL + CE 目标训练这个写回</strong>（从相邻层闭式初始化出发 2000 步，在未见文档上选模型），把 9B→27B 提升到 LongHealth 0.7875 对 0.375（n=80；27B 自身缓存锚点为 0.775）、QuALITY 0.855 对 0.56（+0.295，n=200；原文 0.935，仅尾巴 0.565）。KL + CE 从零开始会失败，是因为读取还不能寻址；在能寻址的读取之上，它是我们最有效的手段。</li>
+      <li><strong>成本与定位。</strong>按 LongHealth 每个问题计，9B 自己预填充原文约需 2.3e14 FLOPs；编码器侧读取在一次 2B 文档预填充被约 20 个问题共享时约 6.4e12（少 36 倍），不复用时约 5.8e13（少 4 倍）；每篇文档运送的算子约 156 MB（2B 的 K/V 加 9.4 MB 状态），而 9B 自己的缓存约 415 MB。关于形式的一个说明：在通过的配置里，读取发生在算子自己的空间、用的是编码器的查询，只有写回 B 跨模型；而所有用读取器自己的查询去读外来算子的变体——即论文原文写法的读取——在未见文档上都失败了。算子仍是原封不动的收集结果，接口仍是闭式映射，但这是否算论文的读取形式，由作者判断。下一步：无标签地精炼 B（逼近同模型锚点）、在 QuALITY 上测投影后层级、以及编码器规模轴（4B→9B、2B→27B、9B→27B）。</li>
+      <li><strong>向旧的 softmax-slot 读取做稠密蒸馏（D9）</strong>的目标确实训练下去了（注意力 KL 2.4 → 0.85 nat，残差比 → 0.24–0.35），但两个判据仍失败（QuALITY +0.010，n=300；LongHealth −0.0125，n=80），证实瓶颈在 slot 读取方式而非训练信号。其教师注意力目标已转给 D10 复用。</li>
+      <li>由此展开的工作：D10 在论文的形式下、在两个分支上构建跨模型接口（逐层 A 把大读取器的查询头映射到小编码器的键空间，B 把读出的值映射回来；同模型情形下恒等初始化必须复现本上限）；D8 压缩 K/V 分支（按文档级注意力重要性保留 25/10/5% 的位置，与随机保留对照），寻找仍能通过门槛的最小原生算子。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>规模阶梯</h2>
+    <div class="charts">{charts}</div>
+    <p>文档在上下文中时，大小模型的差距出现在 2B 与 4B 之间；4B 与 9B 持平，27B 在 QuALITY 上再高 10 分。闭卷准确率也随规模上升，所以今后任何增益都必须对照错误文档条件来衡量，而不是对照闭卷。</p>
+  </section>
+
+  <section>
+    <h2>这决定了什么</h2>
+    <ul>
+      <li>在只用答案监督注册的条件下，一次前向得到的算子经联想分支读取时不传递文档事实，因此 H1–H4 暂时无法在其上检验。去均值、路由和 oracle 选块都改变不了这一点。算子形式本身没有被推翻：缺的是给接口的寻址信号。</li>
+      <li>现在有五条路线在并行推进，全部保持论文的算子形式：用 token 对齐的 2B↔9B 隐状态岭回归初始化查询映射 A；注册时加入槽位级检索监督；改用注意力的键/值而不是残差状态来构造算子；论文第二条路径——按文档用奖励学习紧凑算子；以及更长、更大规模的注册。所有路线用同一个 kv − 错误文档 门槛来判定。</li>
+      <li>如果都过不了错误文档对照，后续工作应转向跨模型的<em>程序性</em>技能——已发表机制在那里是可行的。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3>运行清单</h3>
+    <p class="meta">代码：<code>KV_skill_v2/xenc</code>（52 个 CPU 测试全部通过）。数据：QuALITY 265 篇 / 4,609 题；LongHealth 20 篇 / 400 题，5 折。作业：1 次冒烟、3 次编码、6 次阶梯、9 次注册、9 次评测、1 次探针，在 Qwen3.5-9B/27B（L40S/H100）上完成。结果：<code>outputs/RESULTS.json</code>。</p>
+  </section>
+</main>
+"""
+out = ROOT / "docs" / "report_zh.html"
+out.write_text(page)
+print("wrote", out, len(page), "bytes")

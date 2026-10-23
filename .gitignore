@@ -1,0 +1,27 @@
+data/raw_downloads/
+data/docs/
+data/*_split/
+outputs/
+.deps/
+__pycache__/
+*.pyc
+
+# --- added for GitHub push ---
+/data/
+/outputs/
+/.deps/
+/.claude/
+.pytest_cache/
+slurm/logs/
+slurm/waiters/
+__pycache__/
+*.pyc
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.ckpt
+*.jsonl
+.cache/
+*cache*/

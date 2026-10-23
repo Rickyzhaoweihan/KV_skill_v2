@@ -1,0 +1,7 @@
+# KV-Skill submit priority (user-set 2026-10-23: 1 data scale-up, 2 token injection + deep-layer read, 3 other read math forms). One extended regex per line, matched against the job name;
+# earlier line = higher priority. Unmatched names get the lowest rank. Waiters re-read it every minute.
+^D00NT_probe
+^D00DS_|^D00MCQ_|^D12b_lv|^D12b_mcq
+^D00P6_|^D00P4_|^D00AD_diag|^D00AD_hidd|^D00CAP_big|^D00NT_|^D12b_nt
+^D00R2_|^D00L1_|^D00CAP_|^D00AD_|^D12b_slots
+^D17d_|^D00OOD_|^D00RT_|^D00H2_|^D13
