@@ -25,3 +25,14 @@ __pycache__/
 *.jsonl
 .cache/
 *cache*/
+
+# --- runtime scheduler state / build leftovers (not code) ---
+libpod/
+slurm/hold_queue.txt
+slurm/release_queue.txt
+slurm/held_by_cap.txt
+slurm/cap_override
+slurm/priority.txt.bak*
+# handoff docs stay local (user 10-25: not pushed)
+docs/HANDOFF.md
+docs/HANDOFF_LOG.md

@@ -415,6 +415,44 @@ def main(argv=None) -> int:
                     "question-independent note it writes after the document (type TYPE, L tokens) to every operator, in "
                     "training, val and wrong_doc alike (default '' = off: plain D13Rt)")
     ap.add_argument("--notes_dir", default="", help="NOTES: NoteStore base (default $XENC_CACHE/notes)")
+    ap.add_argument("--cmp", default="", help="CMP (xenc/cmp_op.py): compressor file; every operator the reader reads "
+                    "(train, val, wrong_doc) goes through the per-token bottleneck; the distillation teacher keeps the raw "
+                    "operator (default '' = off)")
+    ap.add_argument("--lr_cmp", type=float, default=1e-4, help="CMP: lr of the decoders U, b (0 = frozen closed form)")
+    ap.add_argument("--hyb", default="", help="CMP hybrid (xenc/cmp_hyb.py): deep-layer memory channel read natively by "
+                    "reader layers 23/27/31 next to the D13 read; a 6-layer compressor file (closed form), gates start at "
+                    "--hyb_g0 (0 = step 0 == the init) (default '' = off)")
+    ap.add_argument("--hyb_g0", type=float, default=0.0)
+    ap.add_argument("--hyb_ckpt", type=int, default=0, help="CMP hybrid: 1 = gradient checkpointing of the deep reads "
+                    "(same values; frees the [heads, rows, columns] attention of 3 layers between forward and backward)")
+    ap.add_argument("--lr_hyb", type=float, default=1e-4, help="CMP hybrid: lr of the cross-model decoders")
+    ap.add_argument("--lr_hyb_g", type=float, default=1e-2, help="CMP hybrid: lr of the deep gates")
+    ap.add_argument("--hyb_hm", type=int, default=0, help="HYB-HM (xenc/hyb_hm.py): width d of an HM-style LEARNED writer "
+                    "z=rmsnorm(W h_t) (bf16, 2d B/token; no PCA, no quantiser) read by the reader's deep layers through "
+                    "learned K/V decoders; V decoder zero-init, FIXED scale 1, so step 0 == the init (default 0 = off)")
+    ap.add_argument("--hm_layer", type=int, default=23, help="HYB-HM: 4B layer whose attention-block input is the writer input")
+    ap.add_argument("--hm_layers", default="23,27,31", help="HYB-HM: reader layers that read the memory")
+    ap.add_argument("--hm_mlp", type=int, default=0, help="HYB-HM: hidden width of an MLP writer (0 = linear)")
+    ap.add_argument("--hm_g", type=float, default=1.0, help="HYB-HM: fixed read scale (not trained)")
+    ap.add_argument("--lr_hm", type=float, default=3e-4, help="HYB-HM: lr of the writer and the K/V decoders")
+    ap.add_argument("--recon_w", type=float, default=0.0, help="RECON (xenc/recon.py): weight of the verbatim "
+                    "reconstruction aux items (HM's dense doc-LM fidelity signal in item form): per step, --recon_n extra "
+                    "items on this step's training docs, 'recite the continuation of <cue>' (teacher-forced KL(text || kv) on "
+                    "every continuation token + CE) or 'does the document state exactly <span>?' (one detail swapped for "
+                    "half of them). Own RNG: the main item stream is unchanged. 0 = off (default)")
+    ap.add_argument("--recon_n", type=int, default=1, help="RECON: aux items per optimizer step")
+    ap.add_argument("--recon_ramp", type=int, default=500, help="RECON: linear weight ramp 0 -> --recon_w over N steps")
+    ap.add_argument("--recon_ce", type=float, default=-1.0, help="RECON: CE weight on aux items (-1 = --ce)")
+    ap.add_argument("--recon_cue", default="8:24", help="RECON recite: cue length range (tokens)")
+    ap.add_argument("--recon_cont", default="12:32", help="RECON recite: continuation length range (tokens)")
+    ap.add_argument("--recon_verify_p", type=float, default=0.0, help="RECON: share of aux items that are altered-detail "
+                    "verification (Yes/No) instead of recite")
+    ap.add_argument("--recon_span", default="16:40", help="RECON verify: statement length range (tokens)")
+    ap.add_argument("--recon_twin", type=int, default=0, help="RECON: the text teacher reads a window of N document tokens "
+                    "around the span (0 = the whole document)")
+    ap.add_argument("--recon_val", type=int, default=0, help="RECON: held-out VAL docs for a teacher-free recite / verify "
+                    "probe at every eval (fixed items; token acc / exact match / CE); 0 = off")
+    ap.add_argument("--recon_seed", type=int, default=12345)
     ap.add_argument("--smoke", action="store_true")
     a = ap.parse_args(argv)
     if a.smoke:
@@ -452,6 +490,37 @@ def main(argv=None) -> int:
             f"{tok.decode(rt.suffix[_nt])!r}")
     else:
         rt = D13Rt(reader, enc, tok, a.reader, itf, a.tail, a.max_tokens, lru=a.lru)
+    cmp = None
+    if a.cmp:                                         # CMP operator bottleneck (default off)
+        from xenc.cmp_op import load_cmp, save_cmp, wire
+        cmp = load_cmp(a.cmp).to(rt.dev)
+        wire(rt, cmp, log=log)
+        cmp_U0 = {k: v.detach().clone() for k, v in cmp.U.items()}
+
+    hyb = None
+    if a.hyb:                                         # CMP hybrid deep channel (default off)
+        from xenc.cmp_hyb import build_hyb, save_hyb
+        hyb = build_hyb(rt, a.hyb, g=a.hyb_g0, log=log)
+        hyb.ckpt = bool(a.hyb_ckpt)
+        hyb_U0 = {k: v.detach().clone() for k, v in hyb.cmp.U.items()}
+
+    hm = None
+    if a.hyb_hm:                                      # HYB-HM learned writer + deep read (default off)
+        assert not a.hyb and not a.cmp, "--hyb_hm replaces --hyb / --cmp"
+        from xenc.hyb_hm import build_hm
+        hm = build_hm(rt, d=a.hyb_hm, hw_layer=a.hm_layer, layers=[int(x) for x in a.hm_layers.split(",")], mlp=a.hm_mlp,
+                      g=a.hm_g, log=log)
+        hm.ckpt = bool(a.hyb_ckpt)
+        hm_W0 = hm.dm.writer.weight.detach().clone() if not a.hm_mlp else None
+
+    def save_cmp_as(d13_path):
+        if hm is not None:
+            from xenc.hyb_hm import save_hm
+            save_hm(hm, d13_path.replace("d13_", "hyb_"), {"args": vars(a)})
+        if cmp is not None:
+            save_cmp(cmp, d13_path.replace("d13_", "cmp_"), {"args": vars(a)})
+        if hyb is not None:
+            save_hyb(hyb, d13_path.replace("d13_", "hyb_"), {"args": vars(a)})
     tr_folds = set(range(5)) - {a.test_fold, a.val_fold}
     train, d1 = select_items(a.train, "train", tr_folds, 0, a.seed)
     val, d2 = select_items(a.val, "val", {a.val_fold}, a.val_q_per_doc, a.val_seed)
@@ -492,6 +561,135 @@ def main(argv=None) -> int:
     tr_docs, va_docs = {_get(i, "doc_id") for i in train}, {_get(i, "doc_id") for i in val}
     assert not (tr_docs & drop) and not (va_docs & drop), "an excluded (judged) document reached train/val"
     assert not (tr_docs & va_docs), "val docs overlap train docs"
+    rc = None
+    if a.recon_w > 0 or a.recon_val > 0:               # RECON aux items / probe (default off: nothing below runs)
+        assert not (a.notes or a.cmp or a.hyb or a.hyb_hm or a.c2_teacher or a.p1_corpus or a.ret_w > 0 or a.hid_w > 0
+                    or getattr(itf, "rs", None)), "--recon_* supports the plain KL / CE / dist recipe only"
+        from xenc import recon as _rc
+        from xenc.e3_retrieval import body_start as _bs
+        from xenc.state_skill import doc_prefix_text as _dpt_rc
+        _rr = lambda s: tuple(int(x) for x in s.split(":"))                     # noqa: E731
+        rc = {"S": _bs(tok, a.reader, SYSTEM_ANSWER), "nfull": {}, "rng": random.Random(a.recon_seed),
+              "cue": _rr(a.recon_cue), "cont": _rr(a.recon_cont), "span": _rr(a.recon_span),
+              "ce": a.ce if a.recon_ce < 0 else a.recon_ce, "hist": [], "n_try": 0, "skip": 0, "shown": 0}
+        log(f"RECON: w {a.recon_w} ramp {a.recon_ramp} n/step {a.recon_n} ce {rc['ce']} | recite cue {rc['cue']} cont "
+            f"{rc['cont']} | verify p {a.recon_verify_p} span {rc['span']} | teacher window {a.recon_twin or 'full doc'} | "
+            f"val probe docs {a.recon_val} | body start S={rc['S']} | items only on TRAIN docs of this step (rng seed "
+            f"{a.recon_seed}, separate from the main item stream)")
+
+    def recon_make(did, rng_, key, kind=None):
+        """One RECON item on document did (spans from its operator body columns) or None."""
+        pre = rt.pre(did)
+        if did not in rc["nfull"]:
+            rc["nfull"][did] = len(tok(_dpt_rc(tok, a.reader, rt.docs[did], SYSTEM_ANSWER),
+                                       add_special_tokens=False)["input_ids"])
+        lo, hi = _rc.body_bounds(len(pre), rc["nfull"][did], rc["S"], a.tail)
+        if kind is None:
+            kind = "verify" if rng_.random() < a.recon_verify_p else "recite"
+        if kind == "verify":
+            it_ = _rc.make_verify(tok, pre, lo, hi, rng_, rt.docs[did], key, rc["span"])
+        else:
+            it_ = _rc.make_recite(tok, pre, lo, hi, rng_, rt.docs[did], key, rc["cue"], rc["cont"])
+        if it_ is not None:
+            mt = it_["meta"]
+            it_["doc_id"] = did
+            mt["tdoc"] = (lo, mt["s"], mt["e"])
+            assert mt["tdoc"][2] <= len(pre) - a.tail, "RECON span reaches the visible tail"
+        return it_
+
+    def recon_loss(it_, w_):
+        """Teacher-forced KL(text || kv) + CE (+ dist) on one RECON item, backward with weight w_ / batch."""
+        R = rt.R
+        did_ = it_["doc_id"]
+        tt_ = text_ids(tok, gold_text(it_))
+        m_ = len(tt_)
+        lo_, s_, e_ = it_["meta"]["tdoc"]
+        tids_ = build_chat(tok, a.reader, SYSTEM_ANSWER,
+                           ctx_prompt(it_, _rc.teacher_doc(tok, rt.pre(did_), lo_, s_, e_, a.recon_twin, rt.docs[did_]))) + tt_
+        if len(tids_) > a.max_tokens:
+            return None
+        R.mode = "off"
+        try:
+            with torch.no_grad():
+                t_ = kept_logits(reader, torch.tensor([tids_]), m_ + 1).detach()
+            rows_ = rt.rows(did_, it_, tt_)
+            op_, n_op_, _ = rt.operator(did_)
+            rec_ = rt.teacher(did_, rows_) if a.dist_w > 0 else None
+            R.load(op_, n_op_)
+            R.mode, R.need_logits, R.rec = "e2e", a.dist_w > 0, {}
+            with torch.enable_grad():
+                s_ = kept_logits(reader, torch.tensor([rows_]), m_ + 1)
+                kl_ = kl_tempered(t_[:-1], s_[:-1], a.kl_temp)
+                ce_ = answer_ce(s_, rows_[-m_:])
+                loss_ = a.kl * kl_ + rc["ce"] * ce_
+                dist_ = torch.zeros((), device=kl_.device)
+                if a.dist_w > 0:
+                    with torch.no_grad():
+                        yref_ = {li: (rec_[e]["out"].float() if B0 is None else rec_[e]["out"].float() @ B0[li].t())
+                                 for li, e in lmap.items()}
+                    terms_ = rt.attn_terms(rec_, op_, n_op_, yref_)
+                    dist_ = torch.stack([x["kl"] + a.rel_w * x["rel"] for x in terms_.values()]).mean()
+                    loss_ = loss_ + a.dist_w * dist_.to(loss_.device)
+                if not math.isfinite(float(loss_)):
+                    return None
+                assert loss_.requires_grad, "RECON term carries no gradient"
+                (w_ * loss_ / a.batch).backward()
+            with torch.no_grad():
+                gold_ = torch.tensor(rows_[-m_:], device=s_.device)
+                hit = (s_[:-1].argmax(-1) == gold_).float()
+                thit = (t_[:-1].argmax(-1).to(s_.device) == gold_).float()
+            return {"loss": float(loss_), "kl": float(kl_), "ce": float(ce_), "dist": float(dist_),
+                    "acc": float(hit.mean()), "em": float(hit.min()), "t_acc": float(thit.mean()), "m": m_,
+                    "kind": it_["meta"]["recon"], "w": w_}
+        except torch.OutOfMemoryError:
+            if not a.mem_safe:
+                raise
+            rt._ops.clear()
+            torch.cuda.empty_cache()
+            log(f"  OOM on RECON item {it_['key']}; skipped")
+            return None
+        finally:
+            R.mode, R.rec = "off", {}
+
+    @torch.no_grad()
+    def recon_probe():
+        """Teacher-free probe on held-out VAL docs: fixed recite + verify items (same in every arm and every eval)."""
+        R = rt.R
+        rng_v, out = random.Random(a.recon_seed + 1), {"recite": [], "verify": []}
+        dv = sorted(va_docs)
+        dv = [dv[int(i * len(dv) / a.recon_val)] for i in range(min(a.recon_val, len(dv)))]
+        for i, did_ in enumerate(dv):
+            for kind in ("recite", "verify"):
+                it_ = recon_make(did_, rng_v, f"{did_}_rcv{i}{kind[0]}", kind)
+                if it_ is None:
+                    continue
+                tt_ = text_ids(tok, gold_text(it_))
+                m_ = len(tt_)
+                rows_ = rt.rows(did_, it_, tt_)
+                try:
+                    op_, n_op_, _ = rt.operator(did_)
+                    R.load(op_, n_op_)
+                    R.mode, R.need_logits, R.rec = "e2e", False, {}
+                    s_ = kept_logits(reader, torch.tensor([rows_]), m_ + 1)
+                except torch.OutOfMemoryError:
+                    rt._ops.clear()
+                    torch.cuda.empty_cache()
+                    continue
+                finally:
+                    R.mode, R.rec = "off", {}
+                gold_ = torch.tensor(rows_[-m_:], device=s_.device)
+                hit = (s_[:-1].argmax(-1) == gold_).float()
+                out[kind].append({"acc": float(hit.mean()), "em": float(hit.min()),
+                                  "ce": float(answer_ce(s_, rows_[-m_:])), "yes": it_["meta"].get("yes")})
+        res = {}
+        for kind, v in out.items():
+            if v:
+                res[kind] = {"n": len(v), **{k: round(sum(x[k] for x in v) / len(v), 4) for k in ("acc", "em", "ce")}}
+                if kind == "verify":
+                    for lab, f in (("yes", True), ("no", False)):
+                        vv = [x for x in v if x["yes"] is f]
+                        res[kind][f"em_{lab}"] = round(sum(x["em"] for x in vv) / max(len(vv), 1), 4)
+        return res
     p1_items, p1_T, p1_by, p1_stats = [], {}, {}, {"n": 0, "kl": 0.0, "ce_used": 0, "skip_tok": 0, "skip_long": 0, "chk": []}
     if a.p1_corpus and a.p1_p > 0:
         assert a.kl_ctx == 0 and a.ret_w == 0 and a.kl_temp == 1.0, "P1 corpus items support only the answer-row KL at T=1"
@@ -678,6 +876,33 @@ def main(argv=None) -> int:
               "dpt": _dpt, "rt": rt, "tok": tok, "a": a}
         log(f"P6: aux_w {a.tok_aux_w} | oracle p α0 {a.tok_oracle_p} anneal {a.tok_oracle_steps} | floor {a.tok_floor} "
             f"from step {a.tok_floor_from} | inj layers {itf.tok_inj_layers} | src {itf.tok_src} adapter {itf.tok_adapter}")
+    cmp_pp = []
+    if cmp is not None and a.lr_cmp > 0:              # CMP decoders: own group, own grad-norm clip
+        cmp_pp = cmp.trainable()
+        for p in cmp_pp:
+            p.requires_grad_(True)
+        groups.append({"params": cmp_pp, "lr": a.lr_cmp, "p4": True})
+        log(f"CMP decoders trainable: {sum(p.numel() for p in cmp_pp) / 1e6:.2f}M lr {a.lr_cmp}")
+    elif cmp is not None:
+        for p in cmp.trainable():
+            p.requires_grad_(False)
+    hyb_pp = []
+    if hyb is not None:                               # CMP hybrid: decoders + deep gates, own group / own clip
+        hyb_pp = hyb.cmp.trainable() + [hyb.dm.g]
+        for p in hyb_pp:
+            p.requires_grad_(True)
+        groups.append({"params": hyb.cmp.trainable(), "lr": a.lr_hyb, "p4": True})
+        groups.append({"params": [hyb.dm.g], "lr": a.lr_hyb_g, "p4": True})
+        log(f"HYB trainable: decoders {sum(p.numel() for p in hyb.cmp.trainable()) / 1e6:.2f}M lr {a.lr_hyb} | gates "
+            f"lr {a.lr_hyb_g} init {a.hyb_g0}")
+    hm_pp = []
+    if hm is not None:                                # HYB-HM: writer + K/V decoders, own group / own clip
+        hm_pp = hm.dm.trainable()
+        for p in hm_pp:
+            p.requires_grad_(True)
+        groups.append({"params": hm_pp, "lr": a.lr_hm, "p4": True})
+        log(f"HYB-HM trainable: {sum(p.numel() for p in hm_pp) / 1e6:.2f}M lr {a.lr_hm} | d {a.hyb_hm} "
+            f"({hm.dm.bytes_per_token()} B/token) writer layer {a.hm_layer} read layers {hm.dm.layers}")
     params = [p for g in groups if not g.get("p4") for p in g["params"]]
     opt = torch.optim.AdamW(groups, weight_decay=0.0)
     for g_ in opt.param_groups:
@@ -804,6 +1029,9 @@ def main(argv=None) -> int:
                            rec["closed_tail"]["score"]] + ([rec["kv_tokoff"]["score"]] if "kv_tokoff" in rec else [])
                           + ([rec["kv_ptroff"]["score"]] if "kv_ptroff" in rec else [])
                           for it, rec in zip(val, rows)]
+        if rc is not None and a.recon_val > 0:      # RECON probe on held-out val docs (teacher-free, fixed items)
+            r["recon_val"] = recon_probe()
+            log(f"  [recon val @ {step}] {r['recon_val']}")
         hist["evals"].append(r)
         crit = r["kv"] + (1e-3 * r["gap"] if math.isfinite(r["gap"]) else 0.0)
         if a.select_task:
@@ -817,6 +1045,7 @@ def main(argv=None) -> int:
         elif crit > best:
             best = crit
             save_d13(itf, best_path, {"stage": "register", "step": step, "val": r, "args": vars(a)})
+            save_cmp_as(best_path)
             tag = " *best*"
         log(f"  [val @ {step}] held-out docs n={r['n']}: kv {r['kv']:.3f} wrong {r['wrong_doc']:.3f} closed_tail "
             f"{r['closed_tail']:.3f} gap {r['gap']:+.3f} ± {r['gap_se']:.3f} gen {r['gen']:.1f}/{r['gen_wrong']:.1f} "
@@ -847,6 +1076,7 @@ def main(argv=None) -> int:
         lr_f = set_lr(step - 1)
         opt.zero_grad(set_to_none=True)
         acc = {"loss": 0.0, "kl": 0.0, "ce": 0.0, "dist": 0.0, "klc": 0.0, "ret": 0.0, "n": 0}
+        step_docs: list = []                        # RECON: this step's training docs (operators already cached)
         for _ in range(a.batch):
             p1 = None
             if p1_items and rng.random() < a.p1_p:          # P1 corpus item: uniform doc, then uniform question
@@ -865,6 +1095,7 @@ def main(argv=None) -> int:
                 it = pools[t][rng.randrange(len(pools[t]))]
                 did = _get(it, "doc_id")
                 target = gold_text(it)
+                step_docs.append(did)
             tt = text_ids(tok, target)
             m = len(tt)
             if p1 is not None:
@@ -1097,8 +1328,50 @@ def main(argv=None) -> int:
             for k, v in (("loss", loss), ("kl", kl), ("ce", ce), ("dist", dist), ("klc", klc), ("ret", rterm)):
                 acc[k] += float(v)
             acc["n"] += 1
+        if rc is not None and a.recon_w > 0 and step_docs:   # RECON aux items (separate rng; after the main items)
+            w_rc = _rc.ramp_weight(step, a.recon_w, a.recon_ramp)
+            for j_ in range(a.recon_n):
+                rc["n_try"] += 1
+                d_rc = step_docs[rc["rng"].randrange(len(step_docs))]
+                it_rc = recon_make(d_rc, rc["rng"], f"{d_rc}_rc{step}_{j_}")
+                o_rc = recon_loss(it_rc, w_rc) if it_rc is not None else None
+                if o_rc is None:
+                    rc["skip"] += 1
+                    continue
+                o_rc["step"] = step
+                rc["hist"].append(o_rc)
+                if rc["shown"] < 8:
+                    rc["shown"] += 1
+                    log(f"  [recon item {rc['shown']}] {it_rc['key']} {o_rc['kind']} | Q {it_rc['question'][:160]!r} | gold "
+                        f"{it_rc['answers'][0][:120]!r} | kl {o_rc['kl']:.3f} ce {o_rc['ce']:.3f} acc {o_rc['acc']:.2f} "
+                        f"teacher acc {o_rc['t_acc']:.2f} w {w_rc:.4f}")
         if acc["n"]:
             gn = torch.nn.utils.clip_grad_norm_(params, 1.0)
+            if hyb_pp:
+                gnh = torch.nn.utils.clip_grad_norm_(hyb_pp, 1.0)
+                if step <= 3 or step % 50 == 0:     # correctness (HYB): gates / decoders receive gradient and move
+                    with torch.no_grad():
+                        dr = {k: round(float((hyb.cmp.U[k] - hyb_U0[k]).norm() / hyb_U0[k].norm().clamp_min(1e-9)), 6)
+                              for k in hyb.cmp.U if int(k) >= 100}
+                    log(f"  [hyb live @ {step}] grad pre-clip {float(gnh):.5f} | g grad "
+                        f"{[round(float(x), 6) for x in hyb.dm.g.grad] if hyb.dm.g.grad is not None else None} | gates "
+                        f"{[round(float(x), 4) for x in hyb.dm.g]} | rel drift U {dr}")
+            if hm_pp:
+                gnm = torch.nn.utils.clip_grad_norm_(hm_pp, 1.0)
+                if step <= 3 or step % 50 == 0:     # correctness (HYB-HM): V decoders move first, then K / writer follow
+                    with torch.no_grad():
+                        nv = {li: round(float(hm.dm.dv[str(li)].weight.norm()), 5) for li in hm.dm.layers}
+                        dw = (round(float((hm.dm.writer.weight - hm_W0).norm() / hm_W0.norm()), 6)
+                              if hm_W0 is not None else None)
+                    log(f"  [hm live @ {step}] grad pre-clip {float(gnm):.5f} | |Uv| {nv} | writer rel drift {dw}")
+            if cmp_pp:
+                gnc = torch.nn.utils.clip_grad_norm_(cmp_pp, 1.0)
+                if step <= 3 or step % 50 == 0:     # correctness (CMP): decoders receive gradient and move
+                    with torch.no_grad():
+                        dr = {k: round(float((cmp.U[k] - cmp_U0[k]).norm() / cmp_U0[k].norm().clamp_min(1e-9)), 6)
+                              for k in cmp.U}
+                    log(f"  [cmp live @ {step}] decoder grad pre-clip {float(gnc):.5f} | rel drift U {dr} | |b| "
+                        f"{[round(float(v.norm()), 5) for v in cmp.b.values()]}")
             if ptr_pp:
                 gnp = torch.nn.utils.clip_grad_norm_(ptr_pp, 1.0)
                 if step <= 3 or step % 25 == 0:
@@ -1195,6 +1468,18 @@ def main(argv=None) -> int:
                     log(f"  [P1 @ {step}] corpus items used {p1_stats['n']} (mean top-k KL {p1_stats['kl'] / max(p1_stats['n'], 1):.4f}, "
                         f"CE on {p1_stats['ce_used']}) | skipped: target re-tokenization {p1_stats['skip_tok']}, over-length "
                         f"{p1_stats['skip_long']}")
+        if rc is not None and a.recon_w > 0 and (step <= 3 or step % 25 == 0):
+            hv = rc["hist"][-50:]
+            byk = {}
+            for x in hv:
+                byk.setdefault(x["kind"], []).append(x)
+            mk = lambda v, k: sum(x[k] for x in v) / max(len(v), 1)              # noqa: E731
+            log(f"  [recon live @ {step}] w {_rc.ramp_weight(step, a.recon_w, a.recon_ramp):.4f} | items {len(rc['hist'])}/"
+                f"{rc['n_try']} (skipped {rc['skip']}) | last {len(hv)}: loss {mk(hv, 'loss'):.4f} kl {mk(hv, 'kl'):.4f} ce "
+                f"{mk(hv, 'ce'):.4f} dist {mk(hv, 'dist'):.4f} | " + " | ".join(
+                    f"{k} n {len(v)} acc {mk(v, 'acc'):.3f} em {mk(v, 'em'):.3f} teacher acc {mk(v, 't_acc'):.3f}"
+                    for k, v in sorted(byk.items())))
+            hist["recon"] = rc["hist"]
         if step % 50 == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
         if step % a.eval_every == 0 or step == a.steps:
@@ -1204,8 +1489,10 @@ def main(argv=None) -> int:
         if ck:                                     # DS --save_every: fixed-step checkpoints for a sweep
             sync_g()
             save_d13(itf, ck, {"stage": "register", "step": step, "args": vars(a)})
+            save_cmp_as(ck)
             log(f"  saved {ck}")
     save_d13(itf, os.path.join(a.out, "d13_last.pt"), {"stage": "register", "step": a.steps, "args": vars(a)})
+    save_cmp_as(os.path.join(a.out, "d13_last.pt"))
     dump()
     if torch.cuda.is_available():
         log(f"max_memory_allocated {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")

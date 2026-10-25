@@ -71,7 +71,8 @@ grep -h "LANE.*_DONE\|step failed" slurm/logs/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_
 # kv@0-only sweep (EFFICIENCY RULES 2026-10-23): eval_d13 (no registration), closed_tail + kv + wrong_doc (R2's args), encoder cuda:0 / reader cuda:1.
 #   SWEEP="tag=path[@deep],..."  -> outputs/ADDRsw_<tag>_<set>; an existing eval_test.json is NOT recomputed
 #   SWSETS (default qasper,musique,lastingbench,loogle,shakespeare_cf)
-SWEEP=${SWEEP:-}; SWSETS=${SWSETS:-qasper,musique,lastingbench,loogle,shakespeare_cf}
+SWEEP=${SWEEP:-}; SWSETS=${SWSETS:-qasper,musique,lastingbench,loogle,shakespeare_cf}; SWCONDS=${SWCONDS:-closed_tail,kv,wrong_doc}
+#   SWSETS may also name quality, longhealth (fold 0) and mcq_* (outputs/MCQ_sets), as in slurm/DS_sweep.sbatch
 ITF5="--B outputs/D11_maps/encB5_9b_4b_post_xf01.pt --layers 3,7,11,15,19"
 ITF8="--B outputs/D13_deep/encB8_9b_4b_post.pt --layers 3,7,11,15,19,23,27,31"
 for ent in $(echo "$SWEEP" | tr ',' ' '); do
@@ -84,8 +85,18 @@ for ent in $(echo "$SWEEP" | tr ',' ' '); do
     # (e.g. R2s_DSAB_qasper); an existing row under either prefix is reused, never recomputed
     [ -s $OUTD/eval_test.json ] && { echo "=== exists, skipped: $OUTD"; continue; }
     [ -s outputs/R2s_${TAG}_$S/eval_test.json ] && { echo "=== exists (R2), reused: outputs/R2s_${TAG}_$S"; continue; }
-    F=outputs/D22_sets/$S.json
-    c="python scripts/eval_d13.py --interface $P --encoder Qwen/Qwen3.5-4B $SI --enc_device cuda:0 --device cuda:1 --conds closed_tail,kv,wrong_doc --budget 32 --oom_skip 1 --d22_set $F --wrong_map outputs/D22_sets/${S}_wrongmap.json --split test --n 0 --split_dir $(python -I -c "import json;print(json.load(open('$F'))['split_dir'])") --max_tokens $(python -I -c "import json;print(json.load(open('$F'))['max_tokens'])") --out $OUTD"
+    case $S in
+      quality)    SA="--split_dir data/quality_split --split test --n 0 --max_tokens 16000";;
+      longhealth) SA="--split_dir data/longhealth_split --split test --fold 0 --n 0 --max_tokens 16000";;
+      mcq_*)      F=outputs/MCQ_sets/$S.json
+                  SA="--d22_set $F --wrong_map outputs/MCQ_sets/${S}_wrongmap.json --split test --n 0 --split_dir $(python -I -c "import json;print(json.load(open('$F'))['split_dir'])") --max_tokens $(python -I -c "import json;print(json.load(open('$F'))['max_tokens'])")";;
+      *)          F=outputs/D22_sets/$S.json
+                  SA="--d22_set $F --wrong_map outputs/D22_sets/${S}_wrongmap.json --split test --n 0 --split_dir $(python -I -c "import json;print(json.load(open('$F'))['split_dir'])") --max_tokens $(python -I -c "import json;print(json.load(open('$F'))['max_tokens'])")";;
+    esac
+    c="python scripts/eval_d13.py --interface $P --encoder Qwen/Qwen3.5-4B $SI --enc_device cuda:0 --device cuda:1 --conds $SWCONDS --budget 32 --oom_skip 1 $SA --out $OUTD"
+    # dedup: reuse any existing item-identical L40S row of the same checkpoint (scripts/r2_reuse.py)
+    RA=$(echo "$SA" | sed -E 's/--(wrong_map|n|fold) [^ ]+//g; s/--split [^ ]+//')
+    python scripts/r2_reuse.py --target $OUTD --interface $P $RA --conds $SWCONDS && { echo "=== reused via r2_reuse: $OUTD"; continue; }
     echo ">>> [$(date +%H:%M)] $c"
     for try in $(seq 1 60); do ( eval "$c" ); rc=$?; [ $rc -eq 75 ] || break; echo "... exit 75 (OOM resume), rerun $try"; done
     [ $rc -eq 0 ] || echo "!!! sweep step failed (rc $rc): $c"

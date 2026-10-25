@@ -15,6 +15,7 @@
 #       INIT   init checkpoint (default outputs/DS_AB_full/d13_best.pt; it is also swept as the step-0 base row)
 #       SKIP_TRAIN=1 only runs the sweep (e.g. after a time-out)
 #       SWEEP_BASE=0 skips the INIT rows (they go to the shared outputs/D17d_base_k0; one job computes them)
+#       BASE_DIR   where the INIT (step-0) rows go (default outputs/D17d_base_k0; set it when INIT is not DS_AB_full)
 # Sweep: INIT + d17_step{1000,2000,3000}.pt + d17_best.pt, each on the D22 sets (Qasper, MuSiQue, LastingBench,
 # ContractNLI, Shakespeare-CF, LooGLE, LooGLE-long), LongHealth fold 0 and QuALITY test full -> outputs/D17d_<TAG>_k0/<ckpt>_<set>.
 # Job ids: slurm/logs/D17d.jobids.
@@ -63,7 +64,7 @@ for s in 1000 2000 3000; do [ -f $OUT/d17_step$s.pt ] && ckpts="$ckpts s$s:$OUT/
 echo "sweep checkpoints: $ckpts"
 for ck in $ckpts; do
   name=${ck%%:*}; path=${ck#*:}
-  SW=${OUT}_k0; [ "$name" = base ] && SW=outputs/D17d_base_k0; mkdir -p $SW
+  SW=${OUT}_k0; [ "$name" = base ] && SW=${BASE_DIR:-outputs/D17d_base_k0}; mkdir -p $SW
   for spec in qasper:16000 musique:16000 lastingbench:18000 contractnli:16000 shakespeare_cf:60000 loogle:128000 loogle_long:128000; do
     set_=${spec%%:*}; mt=${spec#*:}; o=$SW/${name}_$set_
     [ -f $o/eval_test.json ] && { echo "skip $o (exists)"; continue; }

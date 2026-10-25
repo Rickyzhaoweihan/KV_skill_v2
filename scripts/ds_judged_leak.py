@@ -194,7 +194,8 @@ def main(argv=None) -> int:
                 its = [i for i in its if (i.get("meta") or {}).get("fold") == 0]
             S = {"split_dir": sd, "item_keys": [i["key"] for i in its]}
         else:
-            S = json.load(open(f"outputs/MCQ_sets/{t}.json" if t.startswith("mcq_") else f"outputs/D22_sets/{t}.json"))
+            S = json.load(open(f"outputs/MCQ_sets/{t}.json" if t.startswith("mcq_") else
+                               f"outputs/OOD_sets/{t}.json" if t.startswith("d25_") else f"outputs/D22_sets/{t}.json"))
         sd = S["split_dir"]
         D = load_docs(sd)
         items = {i["key"]: i for sp in ("train", "val", "test")             # plain dicts (load_split_items -> DocItem)

@@ -80,6 +80,15 @@ def main(argv=None) -> int:
     ap.add_argument("--wrong_map", default=None,
                     help="[D19] JSON {doc_id: wrong_doc_id} overriding the default shift-7 wrong document "
                          "(e.g. scripts/d19_wrong_map.py, which never pairs near-duplicate documents)")
+    ap.add_argument("--cmp", default="", help="CMP (xenc/cmp_op.py): compressor file; every operator the reader reads goes "
+                    "through the per-token bottleneck (default '' = off: the plain operator)")
+    ap.add_argument("--cmp_quant", default="", help="CMP: storage format of z (bf16|fp16|int8|int4g64|fp32); default = the "
+                    "file's")
+    ap.add_argument("--hyb", default="", help="CMP hybrid (xenc/cmp_hyb.py): deep-layer memory channel; a 6-layer compressor "
+                    "file (closed form) or a saved hyb_*.pt state (default '' = off)")
+    ap.add_argument("--hyb_oracle", type=int, default=0, help="CMP hybrid DIAGNOSTIC: memory = the reader's true K/V of a "
+                    "reader pass over the document (not a method)")
+    ap.add_argument("--hyb_g", type=float, default=None, help="CMP hybrid: override the deep gates (e.g. 1.0)")
     ap.add_argument("--d22_set", default="", help="restrict to the item_keys of a D22 set json (scripts/d22_make_sets.py; "
                     "leave --n 0); use with that set's --wrong_map")
     a = ap.parse_args(argv)
@@ -99,6 +108,21 @@ def main(argv=None) -> int:
         assert a.interface, "--interface is required unless --conds is a subset of closed_book,text"
         reader, enc, tok, itf, lmap = build(a, init=a.interface)
         rt = D13Rt(reader, enc, tok, a.reader, itf, a.tail, a.max_tokens)
+        if a.cmp:                                    # CMP operator bottleneck (default off)
+            from xenc.cmp_op import load_cmp, wire
+            _c = load_cmp(a.cmp).to(rt.dev)
+            if a.cmp_quant:
+                _c.quant = a.cmp_quant
+            wire(rt, _c, log=log)
+        if a.hyb or a.hyb_oracle:                    # CMP hybrid deep channel (default off)
+            from xenc.cmp_hyb import build_hyb
+            _b = torch.load(a.hyb, map_location="cpu", weights_only=False) if a.hyb else {}
+            if isinstance(_b, dict) and _b.get("format") == "xenc.hyb_hm.v1":      # HYB-HM learned writer (xenc/hyb_hm.py)
+                from xenc.hyb_hm import build_hm
+                build_hm(rt, path=a.hyb, log=log)
+            else:
+                _isst = isinstance(_b, dict) and _b.get("format") == "xenc.cmp_hyb.v1"
+                build_hyb(rt, "" if _isst else a.hyb, a.hyb if _isst else "", oracle=bool(a.hyb_oracle), g=a.hyb_g, log=log)
     docs = load_docs(a.split_dir)
     if rt is not None:
         rt.docs = docs

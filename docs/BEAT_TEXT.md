@@ -70,3 +70,8 @@ On lever-1 full (9B, unregistered), kv matches or beats text on comprehension an
 
 ## ENCODER-WRITTEN NOTES (user, 2026-10-23: "encoder是一个LLM而不仅仅是一个encoder…digest/reasoning/comprehension…应该多探索"), agent NOTES
 The encoder generates question-independent notes after prefilling the doc. The notes' encoder K/V are appended as extra operator columns; the reader never sees text. Explore note types (digest, key facts, reasoning, self-QA) and lengths. Probe training-free first, then train the read with note columns. Covers 9B and 27B. Jobs D00NT_ / D12b_nt (rank 2). H-slots v2 (A) waits.
+
+## COMPRESSION DESIGN SPACE (user, 2026-10-23), agent CMP
+HM (colleague's Hub Memory, /nfs/turbo/umms-drjieliu/usr/xiangzhg/kvshill/universal/, read-only) stores a 128-dim hub vector per token. It is strong on extractive and multi-hop sets, weak on comprehension, and ~80× smaller.
+Our full per-layer operator is strong on comprehension but possibly noisy for verbatim and multi-hop.
+CMP sweeps a per-token bottleneck d ∈ {128 … full} (plus layers and quantisation) inside our framework. It reports category scores vs MB/doc, looking for the sweet point where compression filters noise without losing comprehension. Job prefix D00CMP_, rank 2.

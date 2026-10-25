@@ -7,6 +7,16 @@
 ARG=$1; shift
 ENVS=(); while [ "$1" != "--" ]; do ENVS+=("$1"); shift; done; shift
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Optional pre-conditions (default off), given like env assignments before "--" (DS, 2026-10-23: no dependency-pending
+# jobs holding cap slots): WAIT_JOB=<jobid> waits until that job has left the queue; WAIT_FILE=<path> waits until the
+# file exists and its size is stable for 2 minutes. Only then does the waiter join the priority queue below.
+for e in "${ENVS[@]}"; do
+  case "$e" in
+    WAIT_JOB=*) wj=${e#WAIT_JOB=}; while [ -n "$(squeue -h -j "$wj" 2>/dev/null)" ]; do sleep 120; done;;
+    WAIT_FILE=*) wf=${e#WAIT_FILE=}; s0=-1; while :; do s1=$(stat -c %s "$wf" 2>/dev/null || echo -1)
+                 [ "$s1" -gt 0 ] && [ "$s1" = "$s0" ] && break; s0=$s1; sleep 120; done;;
+  esac
+done
 # CPU-only jobs (slurm/cpu.sbatch, no GPU) never wait on the GPU cap.
 case " $* " in *cpu.sbatch\ *) exec env "${ENVS[@]}" sbatch --parsable "$@";; esac
 NAME=$(printf '%s\n' "$@" | sed -n 's/^--job-name=//p' | head -1)
@@ -21,7 +31,10 @@ mine=$(basename "$T")
 while true; do
   CAP=$(bash "$HERE/cap_now.sh" | cut -d' ' -f1)
   case "$ARG" in ''|auto|*[!0-9]*) ;; *) [ "$ARG" -lt "$CAP" ] && CAP=$ARG ;; esac
-  if [ "$(squeue -u rickyhan -h -o "%j %b" | grep -E "^D[0-9]" | grep -c gpu)" -lt "$CAP" ]; then
+  # H100 side quota (user, 2026-10-24): besides the shared cap, up to H100_EXTRA (default 3) KV-Skill jobs may sit on
+  # drjieliu-h100, so 27B jobs are not blocked by L40S jobs that are pending on a full L40S partition.
+  NH=$(squeue -u rickyhan -h -p drjieliu-h100 -o "%j %b" | grep -E "^D[0-9]" | grep -c gpu)
+  if [ "$(squeue -u rickyhan -h -o "%j %b" | grep -E "^D[0-9]" | grep -c gpu)" -lt "$CAP" ] || { [ "$PART" = h100 ] && [ "$NH" -lt "${H100_EXTRA:-3}" ]; }; then
     best=""; bestkey=""
     for f in "$W"/*; do
       [ -e "$f" ] || continue; b=$(basename "$f"); pid=$(echo "$b" | cut -d. -f2)

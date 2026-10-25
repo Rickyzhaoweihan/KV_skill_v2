@@ -30,7 +30,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 STAGES=${STAGES:-A,full,sweep}; has() { [[ ",$STAGES," == *",$1,"* ]]; }
 L12=3,7,11,15,19,23,27,31,35,39,43,47
 C=$XENC_CACHE/D12p; JC=$C/c9b_judge; LC=$C/c9b_lever; FC=$C/c9b_full; RC=$C/c9b_max; MC=$C/c9b_mcq
-INIT=${INIT:-outputs/D12b_lv4_s2/d13_best.pt}; OUT=outputs/D12b_max8k_s2
+INIT=${INIT:-outputs/D12b_lv4_s2/d13_best.pt}; OUT=${OUT:-outputs/D12b_max8k_s2}; SWP=${SWP:-D12b_max8k}  # OUT/SWP overridable (continuation runs)
 B="--B $XENC_CACHE/D12_maps/encB2_27b_9b_m.pt"
 XS="--extra_splits musiquetr=data/musiquetr_split,narrativeqa=data/narrativeqa_split,racemc=data/racemc_split,multirc=data/multirc_split,nqamc=data/nqamc_split,looglemc=data/looglemc_split"
 PB="--reader Qwen/Qwen3.5-27B --encoder Qwen/Qwen3.5-9B $B --layers $L12 --enc_device cpu --reader_mem 74GiB --itf_device cuda:0 \
@@ -63,11 +63,11 @@ fi
 if has sweep; then
   for s in mcq_leval mcq_bamboo; do
     SPEC[$s]="--split_dir $(python -I -c "import json;print(json.load(open('outputs/MCQ_sets/$s.json'))['split_dir'])") --d22_set outputs/MCQ_sets/$s.json --wrong_map outputs/MCQ_sets/${s}_wrongmap.json"; done
-  for k in ${SWEEP:-2000,4000,6000,8000}; do
+  SWEEP=${SWEEP:-2000,4000,6000,8000}; for k in ${SWEEP//,/ }; do
     CK=$OUT/ckpt_$k.pt; [ -s $CK ] || { echo "!!! no $CK"; continue; }
     for s in mcq_leval mcq_bamboo qasper loogle lastingbench shakespeare_cf fecf cqacf q300 lh; do
       echo ">>> max8k@$k $s"; python scripts/eval_d12p.py $PB --interface $CK ${SPEC[$s]} --conds kv,wrong_doc \
-          --out outputs/D12b_max8k_c${k}_$s || echo "!!! max8k@$k $s failed"
+          --out outputs/${SWP}_c${k}_$s || echo "!!! max8k@$k $s failed"
     done
   done
 fi

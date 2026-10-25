@@ -4,6 +4,14 @@
 # 8 when a few other jobs are waiting, 14 when nobody else is waiting for GPUs (raised from 10 by the user, 2026-10-21).
 # Output: "<cap> <reason>"
 PARTS="drjieliu-h100|drjieliu-l40s"
+# User override (2026-10-24: "多排点我需要抢卡来加速进程"): if slurm/cap_override holds a number, it is the cap.
+OV="$(dirname "$0")/cap_override"; if [ -s "$OV" ]; then
+  # User 2026-10-25: cap_override = max NON-HELD KV-Skill GPU jobs (running + pending). Jobs held long-term (not listed in
+  # slurm/hold_queue.txt) are added on top so they do not eat slots; jobs in hold_queue.txt (held only to respect the cap,
+  # released by the coordinator's releaser in priority order) are NOT added, so waiters cannot overtake them.
+  HQ="$(dirname "$0")/hold_queue.txt"; touch "$HQ"
+  lt=$(squeue -u rickyhan -h -t PD -o "%i %j %b %r" 2>/dev/null | awk '$2 ~ /^D[0-9]/ && $3 ~ /gpu/ && $4 ~ /Held/ {print $1}' | grep -vxF -f "$HQ" | grep -c .)
+  echo "$(( $(tr -dc 0-9 < "$OV") + lt )) override: user (slurm/cap_override non-held + $lt long-term held)"; exit 0; fi
 # only jobs actually waiting for GPUs (skip BeginTime / Dependency / held jobs)
 others=$(squeue -h -t PENDING -o "%u %P %b %r" 2>/dev/null | awk -v p="$PARTS" '$1!="rickyhan" && $2 ~ p && $3 ~ /gpu/ && $4 !~ /BeginTime|Dependency|Held/')
 n_pend=$(echo "$others" | grep -c .)

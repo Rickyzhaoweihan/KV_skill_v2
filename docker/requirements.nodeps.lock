@@ -1,0 +1,3 @@
+# installed with: pip install --no-deps --require-hashes -r requirements.nodeps.lock
+# (llmlingua's own deps nltk/tiktoken are deliberately absent: xenc/lingua.py registers placeholder modules, as on the cluster)
+llmlingua==0.2.2 --hash=sha256:da55137efe0db78063b3395396efe8a0dcfe4ae5a09aea0d503c34b7bf1d800c

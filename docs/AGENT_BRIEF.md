@@ -95,3 +95,20 @@ Then RL, OOD, ROUTE, KV-RAG and verification judges. slurm/priority.txt follows 
 3. Save a checkpoint every 1000 steps and run a cheap kv@0 sweep, instead of relying on val selection plus an expensive registered judge.
 4. Reuse existing text rows (item-identical, same GPU type); never recompute text.
 5. Don't re-run anything that already exists; check outputs/ first.
+
+## TOP PRIORITY (user, 2026-10-23): borrow from Hub Memory
+1. RECON: a verbatim reconstruction/recite auxiliary loss in base training, mirroring HM's dense doc-LM KL. Job prefix D00RC_.
+2. CAD: contrastive decoding at inference (kv vs closed-book). Job prefixes D00CAD_ / D12b_cad.
+Then combine the two (CAD on the RECON checkpoint). These come first in slurm/priority.txt. The base max8k runs continue.
+
+## SHARED SCRIPT EDIT RULE (coordinator, 2026-10-23)
+Never edit slurm/submit_when_free.sh (or any script a live waiter/job is executing) in place: bash re-reads the file by byte offset, so live waiters crash or run garbage. Write a new copy and atomically `mv` it over the old path (running processes keep the old inode). Never kill/relaunch another agent's waiter; tell the coordinator instead.
+
+## GPU UTILISATION RULE (user, 2026-10-24: "不能让GPU空着，9B任务也可以H100")
+- 9B / 4B jobs: submit with `-p drjieliu-l40s,drjieliu-h100` (runs on whichever frees first). 27B jobs stay H100-only.
+- Eval / sweep / fit jobs: request 1 GPU (`--gres=gpu:1`, encoder + reader on cuda:0). Only training that does not fit stays 2-GPU.
+- GPU type differs (L40S vs H100 greedy ≈ .01): always record the GPU in outputs and compare kv vs text / control on the same GPU type, or rerun the matched row.
+
+## HANDOFF RULE (user, 2026-10-25: "让你的subagent定期更新handoff文档")
+docs/HANDOFF.md is the takeover document for a new session. Do NOT edit it directly (single owner: the HANDOFF agent). Instead, whenever you report a new result, submit/cancel a job, or change a rule, append ONE line to docs/HANDOFF_LOG.md (append with `>>`, never rewrite): `- YYYY-MM-DD HH:MM [AGENT] what changed; key raw numbers (reader, GPU, subset, ckpt); source file`. The HANDOFF agent merges the log into HANDOFF.md (§0 TL;DR, §5 results, §7 live state, §8 next steps) periodically and after major results.
+- (2026-10-25) Every agent: when you submit/finish/go idle, your HANDOFF_LOG line must also state your current state, what you wait on (job ids / waiter names) and your next action on wake — this feeds the HANDOFF §9.0 resume roster.
